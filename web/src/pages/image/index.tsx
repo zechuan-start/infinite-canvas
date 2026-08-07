@@ -1,37 +1,27 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
-import localforage from "localforage";
+import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, ShoppingBag, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Segmented, Tag, Tooltip, Typography } from "antd";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
-import { ImageSettingsPanel } from "@/components/image-settings-panel";
-import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
-import { canvasThemes } from "@/lib/canvas-theme";
+import { EcommerceSetHistory } from "@/pages/image/components/ecommerce-set-history";
+import { EcommerceSetPanel } from "@/pages/image/components/ecommerce-set-panel";
+import { EcommerceSetResults } from "@/pages/image/components/ecommerce-set-results";
+import { GenerationSettings } from "@/pages/image/components/generation-settings";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
-import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { requestEdit, requestGeneration } from "@/services/api/image";
-import { deleteStoredImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { deleteImageRecords, readImageRecords, saveImageRecord } from "@/services/image-generation-logs";
+import { uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
+import { useEcommerceSetStore } from "@/stores/use-ecommerce-set-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
-import type { ReferenceImage } from "@/types/image";
+import type { EcommerceSetRecord, GeneratedImage, GenerationLogConfig, ReferenceImage, SingleGenerationLog } from "@/types/image";
 import i18n from "@/i18n";
-
-type GeneratedImage = {
-    id: string;
-    dataUrl: string;
-    storageKey?: string;
-    durationMs: number;
-    width: number;
-    height: number;
-    bytes: number;
-    mimeType?: string;
-};
 
 type GenerationResult = {
     id: string;
@@ -40,33 +30,9 @@ type GenerationResult = {
     error?: string;
 };
 
-type GenerationLog = {
-    id: string;
-    createdAt: number;
-    title: string;
-    prompt: string;
-    time: string;
-    model: string;
-    config: GenerationLogConfig;
-    references: ReferenceImage[];
-    durationMs: number;
-    successCount: number;
-    failCount: number;
-    imageCount: number;
-    size: string;
-    quality: string;
-    status: "success" | "failed";
-    images: GeneratedImage[];
-    thumbnails: string[];
-};
+type WorkbenchMode = "single" | "ecommerce-set";
 
-type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count">;
-
-type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
-
-const LOG_STORE_KEY = "infinite-canvas:image_generation_logs";
 const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
-const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
 
 export default function ImagePage() {
     const { message } = App.useApp();
@@ -79,10 +45,12 @@ export default function ImagePage() {
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
+    const [mode, setMode] = useState<WorkbenchMode>("single");
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [results, setResults] = useState<GenerationResult[]>([]);
-    const [logs, setLogs] = useState<GenerationLog[]>([]);
+    const [logs, setLogs] = useState<SingleGenerationLog[]>([]);
+    const [setRecords, setSetRecords] = useState<EcommerceSetRecord[]>([]);
     const [running, setRunning] = useState(false);
     const [logsOpen, setLogsOpen] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
@@ -91,19 +59,27 @@ export default function ImagePage() {
     const [startedAt, setStartedAt] = useState(0);
     const [elapsedMs, setElapsedMs] = useState(0);
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
-    const [previewLog, setPreviewLog] = useState<GenerationLog | null>(null);
+    const [selectedSetIds, setSelectedSetIds] = useState<string[]>([]);
+    const [previewLog, setPreviewLog] = useState<SingleGenerationLog | null>(null);
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
     const [autoRunToken, setAutoRunToken] = useState(0);
     const imageCommand = useWorkbenchAgentStore((state) => state.imageCommand);
     const clearImageCommand = useWorkbenchAgentStore((state) => state.clearImageCommand);
     const updateAgentTask = useWorkbenchAgentStore((state) => state.updateTask);
+    const setRecord = useEcommerceSetStore((state) => state.record);
+    const setRunningTask = useEcommerceSetStore((state) => state.running);
+    const createSetTask = useEcommerceSetStore((state) => state.createTask);
+    const openSetTask = useEcommerceSetStore((state) => state.openTask);
+    const discardSetTask = useEcommerceSetStore((state) => state.discardTask);
     const processedCommandRef = useRef(0);
     const agentTaskIdRef = useRef<string | undefined>(undefined);
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
     const canGenerate = Boolean(prompt.trim());
     const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
+    const isSetMode = mode === "ecommerce-set";
+    const selectedIds = isSetMode ? selectedSetIds : selectedLogIds;
 
     useEffect(() => {
         if (!running || !startedAt) return;
@@ -112,8 +88,23 @@ export default function ImagePage() {
     }, [running, startedAt]);
 
     useEffect(() => {
-        void refreshLogs();
+        void refreshRecords();
     }, []);
+
+    // Set mode always needs an open task; refreshing the list also picks up store-side writes.
+    useEffect(() => {
+        if (!isSetMode) return;
+        if (!useEcommerceSetStore.getState().record) createSetTask();
+    }, [isSetMode, createSetTask]);
+
+    // Mirror the active set task into the history list so progress shows up without a manual refresh.
+    useEffect(() => {
+        if (!setRecord) return;
+        setSetRecords((value) => {
+            const exists = value.some((item) => item.id === setRecord.id);
+            return exists ? value.map((item) => (item.id === setRecord.id ? setRecord : item)) : [setRecord, ...value];
+        });
+    }, [setRecord]);
 
     const addReferences = async (files?: FileList | null) => {
         const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
@@ -225,6 +216,7 @@ export default function ImagePage() {
         }
         if (imageCommand.run) {
             agentTaskIdRef.current = imageCommand.taskId;
+            setMode("single");
             setAutoRunToken((value) => value + 1);
         }
     }, [imageCommand, clearImageCommand, running, updateAgentTask]);
@@ -281,24 +273,41 @@ export default function ImagePage() {
         setPreviewLog(null);
     };
 
-    const deleteSelectedLogs = () => {
-        const imageKeys = logs.filter((log) => selectedLogIds.includes(log.id)).flatMap((log) => log.images.map((image) => image.storageKey).filter((key): key is string => Boolean(key)));
-        void Promise.all([deleteStoredImages(imageKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).then(refreshLogs);
-        if (previewLog && selectedLogIds.includes(previewLog.id)) {
+    const deleteSelected = async () => {
+        setDeleteConfirmOpen(false);
+        if (isSetMode) {
+            const removingActive = setRecord ? selectedSetIds.includes(setRecord.id) : false;
+            if (removingActive) discardSetTask();
+            // Keep the open draft's uploads alive during cleanup unless that task is itself being deleted.
+            await deleteImageRecords(selectedSetIds, removingActive ? undefined : setRecord);
+            setSelectedSetIds([]);
+            await refreshRecords();
+            if (removingActive) createSetTask();
+            return;
+        }
+        const removingPreview = previewLog ? selectedLogIds.includes(previewLog.id) : false;
+        await deleteImageRecords(selectedLogIds, removingPreview ? setRecord : { previewLog, setRecord });
+        setSelectedLogIds([]);
+        if (removingPreview) {
             setPreviewLog(null);
             setResults([]);
         }
-        setSelectedLogIds([]);
-        setDeleteConfirmOpen(false);
+        await refreshRecords();
     };
 
-    const saveLog = (log: GenerationLog) => {
-        void logStore.setItem(log.id, serializeLog(log)).then(refreshLogs);
+    const saveLog = (log: SingleGenerationLog) => {
+        void saveImageRecord(log).then(refreshRecords);
     };
 
-    const refreshLogs = async () => setLogs(await readStoredLogs());
+    const refreshRecords = async () => {
+        const records = await readImageRecords();
+        setLogs(records.filter((record): record is SingleGenerationLog => record.kind === "single"));
+        const sets = records.filter((record): record is EcommerceSetRecord => record.kind === "ecommerce-set");
+        const active = useEcommerceSetStore.getState().record;
+        setSetRecords(active ? [active, ...sets.filter((record) => record.id !== active.id)] : sets);
+    };
 
-    const previewGenerationLog = async (log: GenerationLog) => {
+    const previewGenerationLog = async (log: SingleGenerationLog) => {
         setPreviewLog(log);
         setLogsOpen(false);
         setPrompt(log.prompt);
@@ -370,159 +379,186 @@ export default function ImagePage() {
         }
     };
 
+    const historyPanel = isSetMode ? (
+        <EcommerceSetHistory
+            records={setRecords}
+            selectedIds={selectedSetIds}
+            activeId={setRecord?.id}
+            onSelectedIdsChange={setSelectedSetIds}
+            onCreate={createSetTask}
+            onDeleteSelected={() => setDeleteConfirmOpen(true)}
+            onOpen={(record) => {
+                openSetTask(record);
+                setLogsOpen(false);
+            }}
+        />
+    ) : (
+        <LogPanel
+            logs={logs}
+            selectedLogIds={selectedLogIds}
+            activeLogId={previewLog?.id}
+            onSelectedLogIdsChange={setSelectedLogIds}
+            onCreateSession={createSession}
+            onDeleteSelected={() => setDeleteConfirmOpen(true)}
+            onPreviewLog={(log) => void previewGenerationLog(log)}
+        />
+    );
+
     return (
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
             <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
-                <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">
-                    <LogPanel
-                        logs={logs}
-                        selectedLogIds={selectedLogIds}
-                        activeLogId={previewLog?.id}
-                        onSelectedLogIdsChange={setSelectedLogIds}
-                        onCreateSession={createSession}
-                        onDeleteSelected={() => setDeleteConfirmOpen(true)}
-                        onPreviewLog={(log) => void previewGenerationLog(log)}
-                    />
-                </aside>
+                <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">{historyPanel}</aside>
 
                 <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
-                    <div className="thin-scrollbar flex flex-col rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto">
-                        <div>
-                            <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                    <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">{t("imageWorkbench.title")}</h1>
-                                </div>
-                                <div className="flex shrink-0 gap-2 lg:hidden">
-                                    <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
-                                        {t("workbench.logs")}
-                                    </Button>
-                                    <Button icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
-                                        {t("workbench.settings")}
-                                    </Button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="mt-6 space-y-5">
-                            <div>
-                                <div className="mb-2 flex items-center justify-between gap-3">
-                                    <span className="text-base font-semibold">{t("workbench.prompt")}</span>
-                                    <div className="flex gap-2">
-                                        <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setPromptDialogOpen(true)}>
-                                            {t("workbench.viewPrompts")}
-                                        </Button>
-                                        <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => setAssetPickerOpen(true)}>
-                                            {t("workbench.viewAssets")}
-                                        </Button>
-                                    </div>
-                                </div>
-                                <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder={t("imageWorkbench.promptPlaceholder")} />
-                            </div>
-
-                            <div className="min-w-0">
-                                <div className="mb-2 flex items-center justify-between gap-3">
-                                    <span className="text-base font-semibold">{t("imageWorkbench.references")}</span>
-                                    <div className="flex gap-2">
-                                        <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void addReferencesFromClipboard()}>
-                                            {t("workbench.clipboard")}
-                                        </Button>
-                                        <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
-                                            {t("workbench.upload")}
-                                        </Button>
-                                    </div>
-                                </div>
-                                <div
-                                    className={`hover-scrollbar hover-scrollbar-hint relative flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${isReferenceDragActive ? "border-stone-900 bg-stone-100/80 dark:border-stone-100 dark:bg-stone-900/80" : "border-stone-300 dark:border-stone-700"}`}
-                                    onDragEnter={(event) => {
-                                        event.preventDefault();
-                                        dragDepthRef.current += 1;
-                                        if (event.dataTransfer.types.includes("Files")) setIsReferenceDragActive(true);
-                                    }}
-                                    onDragOver={(event) => {
-                                        event.preventDefault();
-                                        event.dataTransfer.dropEffect = "copy";
-                                    }}
-                                    onDragLeave={(event) => {
-                                        event.preventDefault();
-                                        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-                                        if (!dragDepthRef.current) setIsReferenceDragActive(false);
-                                    }}
-                                    onDrop={(event) => {
-                                        event.preventDefault();
-                                        dragDepthRef.current = 0;
-                                        setIsReferenceDragActive(false);
-                                        void addReferences(event.dataTransfer.files);
-                                    }}
-                                    onWheel={(event) => {
-                                        if (event.currentTarget.scrollWidth <= event.currentTarget.clientWidth) return;
-                                        event.preventDefault();
-                                        event.currentTarget.scrollLeft += event.deltaY;
-                                    }}
-                                >
-                                    {references.map((item, index) => (
-                                        <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
-                                            <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
-                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{imageReferenceLabel(index)}</span>
-                                            <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
-                                            <button
-                                                type="button"
-                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
-                                                onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))}
-                                                aria-label={t("imageWorkbench.removeReference")}
-                                            >
-                                                <Trash2 className="size-3.5" />
-                                            </button>
-                                        </div>
-                                    ))}
-                                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{isReferenceDragActive ? t("imageWorkbench.dropReferences") : t("imageWorkbench.noReferences")}</div> : null}
-                                </div>
-                            </div>
-
-                            <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
-                                <span className="truncate text-stone-500 dark:text-stone-400">
-                                    {modelOptionLabel(effectiveConfig, model)} · {effectiveConfig.size} · {effectiveConfig.quality}
-                                </span>
-                                <Button size="small" type="text" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
-                                    {t("workbench.adjust")}
+                    <div className="flex min-w-0 flex-col gap-3 lg:min-h-0 lg:overflow-hidden">
+                        <div className="flex shrink-0 items-center justify-between gap-3 rounded-lg border border-stone-200 bg-card px-3 py-2 shadow-sm dark:border-stone-800">
+                            <ModeSwitch mode={mode} onChange={setMode} />
+                            <div className="flex shrink-0 gap-2 lg:hidden">
+                                <Button size="small" icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
+                                    {isSetMode ? t("ecommerceSet.tasks") : t("workbench.logs")}
+                                </Button>
+                                <Button size="small" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
+                                    {t("workbench.settings")}
                                 </Button>
                             </div>
+                        </div>
 
-                            <div className="hidden gap-4 sm:grid sm:grid-cols-2">
-                                <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                        {isSetMode && setRecord ? (
+                            <EcommerceSetPanel record={setRecord} />
+                        ) : (
+                            <div className="thin-scrollbar flex flex-col rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto">
+                                <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">{t("imageWorkbench.title")}</h1>
+
+                                <div className="mt-5 space-y-5">
+                                    <div>
+                                        <div className="mb-2 flex items-center justify-between gap-3">
+                                            <span className="text-base font-semibold">{t("workbench.prompt")}</span>
+                                            <div className="flex gap-2">
+                                                <Button size="small" icon={<BookOpen className="size-3.5" />} onClick={() => setPromptDialogOpen(true)}>
+                                                    {t("workbench.viewPrompts")}
+                                                </Button>
+                                                <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => setAssetPickerOpen(true)}>
+                                                    {t("workbench.viewAssets")}
+                                                </Button>
+                                            </div>
+                                        </div>
+                                        <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={7} placeholder={t("imageWorkbench.promptPlaceholder")} />
+                                    </div>
+
+                                    <div className="min-w-0">
+                                        <div className="mb-2 flex items-center justify-between gap-3">
+                                            <span className="text-base font-semibold">{t("imageWorkbench.references")}</span>
+                                            <div className="flex gap-2">
+                                                <Button size="small" icon={<ClipboardPaste className="size-3.5" />} onClick={() => void addReferencesFromClipboard()}>
+                                                    {t("workbench.clipboard")}
+                                                </Button>
+                                                <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
+                                                    {t("workbench.upload")}
+                                                </Button>
+                                            </div>
+                                        </div>
+                                        <div
+                                            className={`hover-scrollbar hover-scrollbar-hint relative flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed p-2 pb-3 overscroll-x-contain transition-colors ${isReferenceDragActive ? "border-stone-900 bg-stone-100/80 dark:border-stone-100 dark:bg-stone-900/80" : "border-stone-300 dark:border-stone-700"}`}
+                                            onDragEnter={(event) => {
+                                                event.preventDefault();
+                                                dragDepthRef.current += 1;
+                                                if (event.dataTransfer.types.includes("Files")) setIsReferenceDragActive(true);
+                                            }}
+                                            onDragOver={(event) => {
+                                                event.preventDefault();
+                                                event.dataTransfer.dropEffect = "copy";
+                                            }}
+                                            onDragLeave={(event) => {
+                                                event.preventDefault();
+                                                dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+                                                if (!dragDepthRef.current) setIsReferenceDragActive(false);
+                                            }}
+                                            onDrop={(event) => {
+                                                event.preventDefault();
+                                                dragDepthRef.current = 0;
+                                                setIsReferenceDragActive(false);
+                                                void addReferences(event.dataTransfer.files);
+                                            }}
+                                            onWheel={(event) => {
+                                                if (event.currentTarget.scrollWidth <= event.currentTarget.clientWidth) return;
+                                                event.preventDefault();
+                                                event.currentTarget.scrollLeft += event.deltaY;
+                                            }}
+                                        >
+                                            {references.map((item, index) => (
+                                                <div key={item.id} className="group relative size-20 shrink-0 overflow-hidden rounded-md border border-stone-200 dark:border-stone-800">
+                                                    <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
+                                                    <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{imageReferenceLabel(index)}</span>
+                                                    <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
+                                                    <button
+                                                        type="button"
+                                                        className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                        onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                                                        aria-label={t("imageWorkbench.removeReference")}
+                                                    >
+                                                        <Trash2 className="size-3.5" />
+                                                    </button>
+                                                </div>
+                                            ))}
+                                            {!references.length ? (
+                                                <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{isReferenceDragActive ? t("imageWorkbench.dropReferences") : t("imageWorkbench.noReferences")}</div>
+                                            ) : null}
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
+                                        <span className="truncate text-stone-500 dark:text-stone-400">
+                                            {modelOptionLabel(effectiveConfig, model)} · {effectiveConfig.size} · {effectiveConfig.quality}
+                                        </span>
+                                        <Button size="small" type="text" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
+                                            {t("workbench.adjust")}
+                                        </Button>
+                                    </div>
+
+                                    <div className="hidden gap-4 sm:grid sm:grid-cols-2">
+                                        <GenerationSettings config={effectiveConfig} model={model} />
+                                    </div>
+                                </div>
+
+                                <div className="mt-auto pt-6">
+                                    <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
+                                        {t("workbench.generate")}
+                                    </Button>
+                                </div>
                             </div>
-                        </div>
-
-                        <div className="mt-auto pt-6">
-                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
-                                {t("workbench.generate")}
-                            </Button>
-                        </div>
+                        )}
                     </div>
 
                     <div className="thin-scrollbar rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto lg:p-5">
-                        <div className="mb-4 flex items-center justify-between gap-3">
-                            <div>
-                                <h2 className="text-xl font-semibold">{t("workbench.results")}</h2>
-                            </div>
-                            {running ? <Tag className="m-0 px-2 py-1">{t("workbench.waiting", { time: formatDuration(elapsedMs) })}</Tag> : null}
-                        </div>
-                        {results.length ? (
-                            <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
-                                {results.map((result, index) =>
-                                    result.status === "success" && result.image ? (
-                                        <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />
-                                    ) : result.status === "failed" ? (
-                                        <FailedImageCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => retryResult(index)} />
-                                    ) : (
-                                        <PendingImageCard key={result.id} />
-                                    ),
-                                )}
-                            </div>
+                        {isSetMode && setRecord ? (
+                            <EcommerceSetResults record={setRecord} />
                         ) : (
-                            <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
-                                <ImagePlus className="mb-4 size-11 text-stone-400" />
-                                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("imageWorkbench.empty")} />
-                            </div>
+                            <>
+                                <div className="mb-4 flex items-center justify-between gap-3">
+                                    <div>
+                                        <h2 className="text-xl font-semibold">{t("workbench.results")}</h2>
+                                    </div>
+                                    {running ? <Tag className="m-0 px-2 py-1">{t("workbench.waiting", { time: formatDuration(elapsedMs) })}</Tag> : null}
+                                </div>
+                                {results.length ? (
+                                    <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
+                                        {results.map((result, index) =>
+                                            result.status === "success" && result.image ? (
+                                                <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />
+                                            ) : result.status === "failed" ? (
+                                                <FailedImageCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => retryResult(index)} />
+                                            ) : (
+                                                <PendingImageCard key={result.id} />
+                                            ),
+                                        )}
+                                    </div>
+                                ) : (
+                                    <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
+                                        <ImagePlus className="mb-4 size-11 text-stone-400" />
+                                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("imageWorkbench.empty")} />
+                                    </div>
+                                )}
+                            </>
                         )}
                     </div>
                 </section>
@@ -538,45 +574,44 @@ export default function ImagePage() {
                     event.target.value = "";
                 }}
             />
-            <Drawer title={t("workbench.logs")} placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
-                <LogPanel
-                    logs={logs}
-                    selectedLogIds={selectedLogIds}
-                    activeLogId={previewLog?.id}
-                    onSelectedLogIdsChange={setSelectedLogIds}
-                    onCreateSession={createSession}
-                    onDeleteSelected={() => setDeleteConfirmOpen(true)}
-                    onPreviewLog={(log) => void previewGenerationLog(log)}
-                />
+            <Drawer title={isSetMode ? t("ecommerceSet.tasks") : t("workbench.logs")} placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
+                {historyPanel}
             </Drawer>
             <Drawer title={t("workbench.settings")} placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
-                    <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                    <GenerationSettings config={effectiveConfig} model={model} showCount={!isSetMode} />
                 </div>
             </Drawer>
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
             <AssetPickerModal open={assetPickerOpen} defaultTab="my-assets" onInsert={(payload) => void insertPickedAsset(payload)} onClose={() => setAssetPickerOpen(false)} />
-            <Modal title={t("workbench.deleteLogs")} open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={deleteSelectedLogs} okText={t("common.delete")} okButtonProps={{ danger: true }} cancelText={t("common.cancel")}>
-                {t("workbench.deleteLogsConfirm", { count: selectedLogIds.length })}
+            <Modal
+                title={isSetMode ? t("ecommerceSet.deleteTasks") : t("workbench.deleteLogs")}
+                open={deleteConfirmOpen}
+                onCancel={() => setDeleteConfirmOpen(false)}
+                onOk={() => void deleteSelected()}
+                okText={t("common.delete")}
+                okButtonProps={{ danger: true, disabled: setRunningTask }}
+                cancelText={t("common.cancel")}
+            >
+                {isSetMode ? t("ecommerceSet.deleteTasksConfirm", { count: selectedIds.length }) : t("workbench.deleteLogsConfirm", { count: selectedIds.length })}
             </Modal>
         </div>
     );
 }
 
-function GenerationSettings({ config, model, updateConfig, openConfigDialog }: { config: AiConfig; model: string; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void }) {
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+/** Single-image mode and e-commerce set mode share this page's models, history and layout. */
+function ModeSwitch({ mode, onChange }: { mode: WorkbenchMode; onChange: (mode: WorkbenchMode) => void }) {
     const { t } = useTranslation();
-
     return (
-        <>
-            <label className="col-span-2 block min-w-0 sm:col-span-1">
-                <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">{t("workbench.model")}</span>
-                <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
-            </label>
-            <div className="col-span-2">
-                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />
-            </div>
-        </>
+        <Segmented
+            block
+            value={mode}
+            onChange={(value) => onChange(value as WorkbenchMode)}
+            options={[
+                { value: "single", label: t("imageWorkbench.modeSingle"), icon: <ImagePlus className="size-3.5" /> },
+                { value: "ecommerce-set", label: t("imageWorkbench.modeSet"), icon: <ShoppingBag className="size-3.5" /> },
+            ]}
+        />
     );
 }
 
@@ -678,13 +713,13 @@ function LogPanel({
     onDeleteSelected,
     onPreviewLog,
 }: {
-    logs: GenerationLog[];
+    logs: SingleGenerationLog[];
     selectedLogIds: string[];
     activeLogId?: string;
     onSelectedLogIdsChange: (ids: string[]) => void;
     onCreateSession: () => void;
     onDeleteSelected: () => void;
-    onPreviewLog: (log: GenerationLog) => void;
+    onPreviewLog: (log: SingleGenerationLog) => void;
 }) {
     const { t } = useTranslation();
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
@@ -726,7 +761,7 @@ function LogPanel({
     );
 }
 
-function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
+function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: SingleGenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
     const { t } = useTranslation();
     const thumbnails = (log.thumbnails || []).filter(Boolean).slice(0, 4);
 
@@ -776,74 +811,6 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
     );
 }
 
-async function readStoredLogs() {
-    if (typeof window === "undefined") return [];
-    try {
-        const values: GenerationLog[] = [];
-        await logStore.iterate<GenerationLog, void>((value) => {
-            values.push(value);
-        });
-        const logs = await Promise.all(values.map(normalizeLog));
-        return logs.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    } catch {
-        return [];
-    }
-}
-
-async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog> {
-    const references = await Promise.all(
-        (log.references || []).map(async (item) => ({
-            ...item,
-            dataUrl: await resolveImageUrl(item.storageKey, item.dataUrl),
-        })),
-    );
-    const images = await Promise.all(
-        (log.images || []).map(async (item) => ({
-            ...item,
-            dataUrl: await resolveImageUrl(item.storageKey, item.dataUrl),
-        })),
-    );
-    const config = normalizeLogConfig(log);
-    return {
-        id: log.id || nanoid(),
-        createdAt: log.createdAt || Date.now(),
-        title: log.title || log.model || i18n.t("workbench.untitled"),
-        prompt: log.prompt || log.title || "",
-        time: log.time || new Date().toLocaleString(i18n.resolvedLanguage, { hour12: false }),
-        model: log.model || config.imageModel || "",
-        config,
-        references,
-        durationMs: log.durationMs || 0,
-        successCount: log.successCount ?? log.imageCount ?? 0,
-        failCount: log.failCount || 0,
-        imageCount: log.imageCount || log.successCount || 0,
-        size: log.size || config.size || "",
-        quality: log.quality || config.quality || "",
-        status: log.status || "success",
-        images,
-        thumbnails: images.map((image) => image.dataUrl).filter(Boolean),
-    };
-}
-
-function serializeLog(log: GenerationLog): GenerationLog {
-    return {
-        ...log,
-        references: log.references.map((item) => ({ ...item, dataUrl: item.storageKey ? "" : item.dataUrl })),
-        images: log.images.map((image) => ({ ...image, dataUrl: image.storageKey ? "" : image.dataUrl })),
-        thumbnails: [],
-    };
-}
-
-function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
-    return {
-        model: log.config?.model || log.model || "",
-        imageModel: log.config?.imageModel || log.model || "",
-        quality: log.config?.quality || log.quality || "",
-        size: log.config?.size || log.size || "",
-        count: log.config?.count || String(log.imageCount || log.successCount || 1),
-    };
-}
-
 function moveListItem<T>(items: T[], index: number, offset: number) {
     const targetIndex = index + offset;
     if (targetIndex < 0 || targetIndex >= items.length) return items;
@@ -880,9 +847,9 @@ function buildLog({
     durationMs: number;
     successCount: number;
     failCount: number;
-    status: GenerationLog["status"];
+    status: SingleGenerationLog["status"];
     images: GeneratedImage[];
-}): GenerationLog {
+}): SingleGenerationLog {
     const logConfig = {
         model: config.model,
         imageModel: config.imageModel,
@@ -890,9 +857,12 @@ function buildLog({
         size: config.size,
         count: config.count,
     };
+    const now = Date.now();
     return {
         id: nanoid(),
-        createdAt: Date.now(),
+        kind: "single",
+        createdAt: now,
+        updatedAt: now,
         title: prompt.slice(0, 12) || i18n.t("workbench.untitled"),
         prompt,
         time: new Date().toLocaleString(i18n.resolvedLanguage, { hour12: false }),
