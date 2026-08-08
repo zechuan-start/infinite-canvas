@@ -128,6 +128,8 @@ function ReviewSummary({ record }: { record: EcommerceSetRecord }) {
 function SlotCard({ slot, index, reviewSlot, running, onRetry, onDownload }: { slot: EcommerceSetSlot; index: number; reviewSlot?: EcommerceReviewSlot; running: boolean; onRetry: () => void; onDownload: () => void }) {
     const { t } = useTranslation();
     const failed = slot.status === "generation_failed";
+    const canRetry = failed || Boolean(slot.storageKey);
+    const retryLabel = failed ? t("workbench.retry") : t("ecommerceSet.regenerate");
 
     return (
         <div className={`overflow-hidden rounded-lg border bg-background ${failed ? "border-red-200 dark:border-red-950" : "border-stone-200 dark:border-stone-800"}`}>
@@ -171,9 +173,9 @@ function SlotCard({ slot, index, reviewSlot, running, onRetry, onDownload }: { s
                             {t("ecommerceSet.downloadOriginal")}
                         </Button>
                     </Tooltip>
-                    {failed ? (
-                        <Button size="small" danger icon={<RefreshCw className="size-3.5" />} disabled={running} onClick={onRetry}>
-                            {t("workbench.retry")}
+                    {canRetry ? (
+                        <Button className="min-w-0 flex-1 px-1.5" size="small" danger={failed} icon={<RefreshCw className="size-3.5" />} loading={slot.status === "generating"} disabled={running || !slot.enabled || !slot.prompt.trim()} onClick={onRetry}>
+                            {retryLabel}
                         </Button>
                     ) : null}
                 </div>

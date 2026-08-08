@@ -398,15 +398,16 @@ export const useEcommerceSetStore = create<EcommerceSetStore>((set, get) => {
             const record = get().record;
             if (!record || get().running) return;
             const slot = record.slots.find((item) => item.id === id);
-            if (!slot?.prompt.trim()) return;
+            if (!slot?.enabled || !slot.prompt.trim()) return;
             const operation = beginOperation(record.id, "retry");
             const config = imageConfig();
-            patchRecord({ model: config.model, config: logConfig(config) }, record.id);
+            const slots = record.slots.map((item) => (item.status === "passed" || item.status === "manual_review" ? { ...item, status: "generated" as const } : item));
+            patchRecord({ model: config.model, config: logConfig(config), status: "generating", review: undefined, slots }, record.id);
             const ok = await runSlot(slot, operation, config, [...record.references]);
             if (isActive(operation)) {
                 const finished = get().record;
-                if (finished) patchRecord({ status: generationStatus(finished.slots) }, record.id);
-                if (ok) persist();
+                const next = finished ? patchRecord({ status: generationStatus(finished.slots) }, record.id) : null;
+                if (next) persist(next, ok && Boolean(slot.storageKey));
             }
             finishOperation(operation);
         },
@@ -456,9 +457,9 @@ function generationStatus(slots: EcommerceSetSlot[]): EcommerceSetRecord["status
     if (!enabled.length) return "draft";
     const succeeded = enabled.filter((slot) => slot.storageKey).length;
     const failed = enabled.filter((slot) => slot.status === "generation_failed").length;
+    if (failed) return succeeded ? "partial" : "failed";
     if (succeeded === enabled.length) return "generated";
     if (succeeded) return "partial";
-    if (failed) return "failed";
     return enabled.every((slot) => slot.prompt.trim()) ? "prompt_ready" : "draft";
 }
 
