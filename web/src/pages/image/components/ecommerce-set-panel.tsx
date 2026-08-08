@@ -41,7 +41,11 @@ export function EcommerceSetPanel({ record }: { record: EcommerceSetRecord }) {
     const addFiles = async (files?: FileList | null) => {
         const images = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
         if (!images.length) return;
-        await addReferences(images.map((file) => ({ blob: file, name: file.name })));
+        try {
+            await addReferences(images.map((file) => ({ blob: file, name: file.name })));
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : t("ecommerceSet.errors.unknown"));
+        }
     };
 
     const addFromClipboard = async () => {
@@ -52,7 +56,12 @@ export function EcommerceSetPanel({ record }: { record: EcommerceSetRecord }) {
                 message.error(t("imageWorkbench.clipboardEmpty"));
                 return;
             }
-            await addReferences(blobs.map((blob, index) => ({ blob, name: `clipboard-${index + 1}.png` })));
+            try {
+                await addReferences(blobs.map((blob, index) => ({ blob, name: `clipboard-${index + 1}.png` })));
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("ecommerceSet.errors.unknown"));
+                return;
+            }
             message.success(t("imageWorkbench.clipboardAdded", { count: blobs.length }));
         } catch {
             message.error(t("imageWorkbench.clipboardEmpty"));

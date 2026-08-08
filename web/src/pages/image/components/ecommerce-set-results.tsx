@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { deliverableSlots, downloadSlotOriginal, exportSetPackage, saveSetToAssets, sendSetToCanvas } from "@/lib/ecommerce-set/delivery";
 import { setStatusLabel, shotRoleLabel, slotStatusLabel } from "@/lib/ecommerce-set/presets";
+import { isReviewableSlot } from "@/lib/ecommerce-set/review";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { imageQualityLabel, imageSizeLabel } from "@/components/image-settings-panel";
 import { modelOptionName } from "@/stores/use-config-store";
@@ -19,8 +20,10 @@ export function EcommerceSetResults({ record }: { record: EcommerceSetRecord }) 
     const running = useEcommerceSetStore((state) => state.running);
     const retrySlot = useEcommerceSetStore((state) => state.retrySlot);
     const review = useEcommerceSetStore((state) => state.review);
+    const reviewSlot = useEcommerceSetStore((state) => state.reviewSlot);
     const slots = [...record.slots].sort((a, b) => a.order - b.order).filter((slot) => slot.enabled || slot.storageKey);
     const deliverables = deliverableSlots(record);
+    const canReview = record.slots.some(isReviewableSlot);
     const reviewFailed = record.review?.status === "failed";
 
     const run = async (action: () => Promise<string> | string) => {
@@ -45,7 +48,7 @@ export function EcommerceSetResults({ record }: { record: EcommerceSetRecord }) 
                     ) : null}
                 </div>
                 <div className="flex flex-wrap gap-2">
-                    <Button size="small" icon={<Check className="size-3.5" />} disabled={running || !deliverables.length} onClick={() => void review()}>
+                    <Button size="small" icon={<Check className="size-3.5" />} disabled={running || !canReview} onClick={() => void review()}>
                         {t("ecommerceSet.review")}
                     </Button>
                     <Button size="small" icon={<PackageOpen className="size-3.5" />} disabled={!deliverables.length} onClick={() => void run(async () => t("ecommerceSet.exported", { count: await exportSetPackage(record) }))}>
@@ -89,6 +92,7 @@ export function EcommerceSetResults({ record }: { record: EcommerceSetRecord }) 
                             reviewSlot={record.review?.slots.find((item) => item.slotId === slot.id)}
                             running={running}
                             onRetry={() => void retrySlot(slot.id)}
+                            onReview={() => void reviewSlot(slot.id)}
                             onDownload={() => void run(async () => (await downloadSlotOriginal(slot, index), t("ecommerceSet.downloadedOriginal")))}
                         />
                     ))}
@@ -108,6 +112,7 @@ function ReviewSummary({ record }: { record: EcommerceSetRecord }) {
     const review = record.review;
     if (!review || review.status === "failed") return null;
     const manual = review.slots.filter((slot) => slot.status === "manual_review");
+    const total = record.slots.filter(isReviewableSlot).length;
 
     return (
         <div className="mb-4 rounded-lg border border-stone-200 bg-stone-50 p-3 dark:border-stone-800 dark:bg-stone-900">
@@ -116,6 +121,7 @@ function ReviewSummary({ record }: { record: EcommerceSetRecord }) {
                 <Tag className="m-0" color={review.status === "passed" ? "green" : "orange"}>
                     {t(`ecommerceSet.reviewStatus.${review.status}`)}
                 </Tag>
+                <Tag className="m-0">{t("ecommerceSet.reviewProgress", { reviewed: review.slots.length, total })}</Tag>
                 {review.batches > 1 ? <Tag className="m-0">{t("ecommerceSet.batchedReview", { count: review.batches })}</Tag> : null}
                 {review.requestBytes ? <Tag className="m-0">{t("ecommerceSet.reviewRequestBytes", { size: formatBytes(review.requestBytes) })}</Tag> : null}
             </div>
@@ -125,7 +131,7 @@ function ReviewSummary({ record }: { record: EcommerceSetRecord }) {
     );
 }
 
-function SlotCard({ slot, index, reviewSlot, running, onRetry, onDownload }: { slot: EcommerceSetSlot; index: number; reviewSlot?: EcommerceReviewSlot; running: boolean; onRetry: () => void; onDownload: () => void }) {
+function SlotCard({ slot, index, reviewSlot, running, onRetry, onReview, onDownload }: { slot: EcommerceSetSlot; index: number; reviewSlot?: EcommerceReviewSlot; running: boolean; onRetry: () => void; onReview: () => void; onDownload: () => void }) {
     const { t } = useTranslation();
     const failed = slot.status === "generation_failed";
     const canRetry = failed || Boolean(slot.storageKey);
@@ -167,10 +173,15 @@ function SlotCard({ slot, index, reviewSlot, running, onRetry, onDownload }: { s
                     {slot.attempts > 1 ? <span>{t("ecommerceSet.attempts", { count: slot.attempts })}</span> : null}
                 </div>
                 {reviewSlot ? <SlotChecks reviewSlot={reviewSlot} /> : null}
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                     <Tooltip title={t("ecommerceSet.downloadOriginal")}>
                         <Button className="min-w-0 flex-1 px-1.5" size="small" icon={<Download className="size-3.5" />} disabled={!slot.storageKey} onClick={onDownload}>
                             {t("ecommerceSet.downloadOriginal")}
+                        </Button>
+                    </Tooltip>
+                    <Tooltip title={reviewSlot ? t("ecommerceSet.reviewAgain") : t("ecommerceSet.reviewOne")}>
+                        <Button className="min-w-0 flex-1 px-1.5" size="small" icon={<Check className="size-3.5" />} loading={slot.status === "review_pending"} disabled={running || !isReviewableSlot(slot)} onClick={onReview}>
+                            {reviewSlot ? t("ecommerceSet.reviewAgain") : t("ecommerceSet.reviewOne")}
                         </Button>
                     </Tooltip>
                     {canRetry ? (

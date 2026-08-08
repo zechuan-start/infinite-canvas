@@ -270,6 +270,9 @@ export default {
         reviewFailedHint: "视觉复核失败，所有生成原图已保留，可稍后重试复核。",
         reviewRequestBytes: "复核上传 {{size}}",
         batchedReview: "分批复核 {{count}} 批",
+        reviewProgress: "已复核 {{reviewed}}/{{total}} 张",
+        reviewOne: "复核此图",
+        reviewAgain: "重新复核",
         manualReviewHint: "需人工确认：{{shots}}。复核只输出结论，可在对应结果卡中重新生成。",
         reviewStatus: { passed: "复核通过", manual_review: "需人工确认", failed: "复核失败" },
         checks: { productConsistency: "产品一致", materialAccuracy: "材质准确", composition: "构图符合", textAccuracy: "文字正确" },
@@ -319,6 +322,7 @@ export default {
             compressCanvasFailed: "当前浏览器无法创建画布，无法压缩复核图",
             compressEncodeFailed: "生成图压缩失败，已阻止本次复核，不会上传未压缩原图",
             compressTransparentUnsupported: "当前浏览器不支持 WebP，透明图无法在保留透明通道的前提下压缩，已阻止本次复核",
+            reviewRequestTooLarge: "复核请求仍超过单批大小限制，请减少产品参考图或降低生成图尺寸后重试",
             unknown: "操作失败",
         },
         prompts: {

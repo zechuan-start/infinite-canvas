@@ -270,6 +270,9 @@ export default {
         reviewFailedHint: "The review failed. Every generated original is kept, and no uncompressed image was uploaded as a fallback.",
         reviewRequestBytes: "Review upload {{size}}",
         batchedReview: "Reviewed in {{count}} batches",
+        reviewProgress: "{{reviewed}}/{{total}} shots reviewed",
+        reviewOne: "Review this image",
+        reviewAgain: "Review again",
         manualReviewHint: "Needs a human check: {{shots}}. The review only reports findings; regenerate the affected shot from its result card.",
         reviewStatus: { passed: "Passed", manual_review: "Needs a human check", failed: "Review failed" },
         checks: { productConsistency: "Product matches", materialAccuracy: "Materials accurate", composition: "Composition fits", textAccuracy: "Text correct" },
@@ -319,6 +322,7 @@ export default {
             compressCanvasFailed: "This browser cannot create a canvas, so the review copy cannot be compressed",
             compressEncodeFailed: "Compression failed, so the review was blocked. No uncompressed original was uploaded.",
             compressTransparentUnsupported: "This browser does not support WebP, so a transparent image cannot be compressed while keeping its alpha channel. The review was blocked.",
+            reviewRequestTooLarge: "The review request is still too large for one batch. Reduce product references or generated image size and retry.",
             unknown: "The operation failed",
         },
         prompts: {

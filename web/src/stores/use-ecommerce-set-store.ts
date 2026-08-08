@@ -2,13 +2,14 @@ import { create } from "zustand";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
-import { resolveStyleText, SHOT_TEMPLATES, STYLE_PRESETS } from "@/lib/ecommerce-set/presets";
+import { resolveStyleText, SHOT_TEMPLATES, shotRoleLabel, STYLE_PRESETS } from "@/lib/ecommerce-set/presets";
+import { isReviewableSlot } from "@/lib/ecommerce-set/review";
 import { analyzeProduct, generateSlotImage, planSlotPrompts, reviewSet } from "@/services/ecommerce-set-generation";
 import { saveImageRecord } from "@/services/image-generation-logs";
 import { deleteStoredImages, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
-import type { EcommerceReferenceRole, EcommerceSetSlot, EcommerceShotRole, ProductProfile, ProductReference } from "@/types/ecommerce-set";
+import type { EcommerceReferenceRole, EcommerceReview, EcommerceReviewSlot, EcommerceSetSlot, EcommerceShotRole, ProductProfile, ProductReference } from "@/types/ecommerce-set";
 import type { EcommerceSetRecord, GenerationLogConfig } from "@/types/image";
 
 /** Bounded queue: a six-shot set must not open six 2K image requests at once. */
@@ -41,6 +42,7 @@ type EcommerceSetStore = {
     generate: () => Promise<void>;
     retrySlot: (id: EcommerceShotRole) => Promise<void>;
     review: () => Promise<void>;
+    reviewSlot: (id: EcommerceShotRole) => Promise<void>;
     stop: () => void;
 };
 
@@ -229,12 +231,18 @@ export const useEcommerceSetStore = create<EcommerceSetStore>((set, get) => {
             if (!inputs.length) return;
             const taskId = get().record?.id;
             if (!taskId) return;
-            const uploaded = await Promise.all(
+            const results = await Promise.allSettled(
                 inputs.map(async (input) => {
                     const image = await uploadImage(input.blob);
                     return { id: nanoid(), name: input.name, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
                 }),
             );
+            const uploaded = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+            const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+            if (failed) {
+                await deleteStoredImages(uploaded.map((item) => item.storageKey));
+                throw failed.reason instanceof Error ? failed.reason : new Error(i18n.t("ecommerceSet.errors.unknown"));
+            }
             if (get().record?.id !== taskId) {
                 await deleteStoredImages(uploaded.map((item) => item.storageKey));
                 return;
@@ -338,7 +346,8 @@ export const useEcommerceSetStore = create<EcommerceSetStore>((set, get) => {
             const record = cancelCurrentOperation();
             if (!record) return;
             const slots = record.slots.map((slot) => (slot.id === id ? { ...slot, enabled: !slot.enabled } : slot));
-            const next = { ...record, status: generationStatus(slots), review: undefined, slots, updatedAt: Date.now() };
+            const review = removeReviewSlot(record.review, id);
+            const next = { ...record, status: review ? reviewRecordStatus({ ...record, slots }, review) : generationStatus(slots), review, slots, updatedAt: Date.now() };
             set({ record: next });
             persist(next);
         },
@@ -346,7 +355,7 @@ export const useEcommerceSetStore = create<EcommerceSetStore>((set, get) => {
         moveSlot: (index, offset) => {
             const record = cancelCurrentOperation();
             if (!record) return;
-            const next = { ...record, review: undefined, slots: moveItem(record.slots, index, offset).map((slot, order) => ({ ...slot, order })), updatedAt: Date.now() };
+            const next = { ...record, slots: moveItem(record.slots, index, offset).map((slot, order) => ({ ...slot, order })), updatedAt: Date.now() };
             set({ record: next });
             persist(next);
         },
@@ -356,7 +365,9 @@ export const useEcommerceSetStore = create<EcommerceSetStore>((set, get) => {
             const slot = record?.slots.find((item) => item.id === id);
             if (!record || !slot || slot.prompt === prompt) return;
             const invalidated = resetSlot(slot, prompt, slot.requiredElements, slot.avoidElements);
-            const next = { ...record, status: "prompt_ready" as const, review: undefined, slots: record.slots.map((item) => (item.id === id ? invalidated : item)), updatedAt: Date.now() };
+            const slots = record.slots.map((item) => (item.id === id ? invalidated : item));
+            const review = removeReviewSlot(record.review, id);
+            const next = { ...record, status: review ? reviewRecordStatus({ ...record, slots }, review) : "prompt_ready" as const, review, slots, updatedAt: Date.now() };
             set({ record: next });
             slot.storageKey ? persist(next, true) : schedulePersist();
         },
@@ -401,8 +412,8 @@ export const useEcommerceSetStore = create<EcommerceSetStore>((set, get) => {
             if (!slot?.enabled || !slot.prompt.trim()) return;
             const operation = beginOperation(record.id, "retry");
             const config = imageConfig();
-            const slots = record.slots.map((item) => (item.status === "passed" || item.status === "manual_review" ? { ...item, status: "generated" as const } : item));
-            patchRecord({ model: config.model, config: logConfig(config), status: "generating", review: undefined, slots }, record.id);
+            const slots = record.slots.map((item) => (item.id === id ? { ...item, status: item.storageKey ? ("generated" as const) : ("pending" as const), error: undefined } : item));
+            patchRecord({ model: config.model, config: logConfig(config), status: "generating", review: removeReviewSlot(record.review, id), slots }, record.id);
             const ok = await runSlot(slot, operation, config, [...record.references]);
             if (isActive(operation)) {
                 const finished = get().record;
@@ -415,10 +426,13 @@ export const useEcommerceSetStore = create<EcommerceSetStore>((set, get) => {
         review: async () => {
             const record = get().record;
             if (!record || get().running) return;
-            const reviewable = record.slots.filter((slot) => slot.enabled && slot.storageKey);
+            const reviewable = record.slots.filter(isReviewableSlot);
             if (!reviewable.length) return;
+            const previousStatuses = new Map(record.slots.map((slot) => [slot.id, slot.status] as const));
+            const previousRecordStatus = record.status;
+            const previousReview = record.review;
             const operation = beginOperation(record.id, "review");
-            patchRecord({ status: "reviewing", error: undefined, slots: record.slots.map((slot) => (slot.enabled && slot.storageKey ? { ...slot, status: "review_pending" } : slot)) }, record.id);
+            patchRecord({ status: "reviewing", error: undefined, slots: record.slots.map((slot) => (isReviewableSlot(slot) ? { ...slot, status: "review_pending" } : slot)) }, record.id);
             try {
                 const review = await reviewSet(visionConfig(), { references: record.references, slots: reviewable, profile: record.profile }, { signal: operation.controller.signal });
                 if (!isActive(operation)) return;
@@ -428,11 +442,47 @@ export const useEcommerceSetStore = create<EcommerceSetStore>((set, get) => {
                     const result = review.slots.find((item) => item.slotId === slot.id);
                     return result ? { ...slot, status: result.status } : slot;
                 });
-                patchRecord({ status: "reviewed", review, slots }, record.id);
+                const nextRecord = { ...current, slots };
+                patchRecord({ status: reviewRecordStatus(nextRecord, review), review, slots }, record.id);
             } catch (error) {
                 if (isActive(operation)) {
-                    const slots = (get().record?.slots || []).map((slot) => (slot.status === "review_pending" ? { ...slot, status: "generated" as const } : slot));
-                    patchRecord({ status: generationStatus(slots), review: { reviewedAt: Date.now(), status: "failed", summary: "", requestBytes: 0, batches: 0, slots: [], error: readError(error) }, slots }, record.id);
+                    const slots = (get().record?.slots || []).map((slot) =>
+                        slot.status === "review_pending" ? { ...slot, status: previousStatuses.get(slot.id) || ("generated" as const) } : slot,
+                    );
+                    patchRecord({ status: previousRecordStatus, review: previousReview, error: readError(error), slots }, record.id);
+                }
+            } finally {
+                if (isActive(operation)) persist();
+                finishOperation(operation);
+            }
+        },
+
+        reviewSlot: async (id) => {
+            const record = get().record;
+            if (!record || get().running) return;
+            const slot = record.slots.find((item) => item.id === id);
+            if (!slot || !isReviewableSlot(slot)) return;
+            const previousStatus = slot.status === "review_pending" ? (record.review?.slots.find((item) => item.slotId === id)?.status || "generated") : slot.status;
+            const previousRecordStatus = record.status;
+            const previousReview = record.review;
+            const operation = beginOperation(record.id, "review");
+            patchRecord({ status: "reviewing", error: undefined, slots: record.slots.map((item) => (item.id === id ? { ...item, status: "review_pending" } : item)) }, record.id);
+            try {
+                const result = await reviewSet(visionConfig(), { references: record.references, slots: [slot], profile: record.profile }, { signal: operation.controller.signal });
+                if (!isActive(operation)) return;
+                const current = get().record;
+                const resultSlot = result.slots.find((item) => item.slotId === id);
+                if (!current || current.id !== record.id) return;
+                if (!resultSlot) throw new Error(i18n.t("ecommerceSet.errors.reviewSlotMissing", { slot: shotRoleLabel(id) }));
+                const slots = current.slots.map((item) => (item.id === id ? { ...item, status: resultSlot.status } : item));
+                const mergedReview = mergeReview(current, result);
+                const nextRecord = { ...current, slots };
+                patchRecord({ status: reviewRecordStatus(nextRecord, mergedReview), review: mergedReview, slots }, record.id);
+            } catch (error) {
+                if (isActive(operation)) {
+                    const current = get().record;
+                    const slots = current?.slots.map((item) => (item.id === id ? { ...item, status: previousStatus } : item));
+                    patchRecord({ status: previousRecordStatus, review: previousReview, error: readError(error), ...(slots ? { slots } : {}) }, record.id);
                 }
             } finally {
                 if (isActive(operation)) persist();
@@ -461,6 +511,35 @@ function generationStatus(slots: EcommerceSetSlot[]): EcommerceSetRecord["status
     if (succeeded === enabled.length) return "generated";
     if (succeeded) return "partial";
     return enabled.every((slot) => slot.prompt.trim()) ? "prompt_ready" : "draft";
+}
+
+function reviewStatus(slots: EcommerceReviewSlot[]): EcommerceReview["status"] {
+    return slots.some((slot) => slot.status === "manual_review") ? "manual_review" : "passed";
+}
+
+function removeReviewSlot(review: EcommerceReview | undefined, id: EcommerceShotRole) {
+    if (!review) return undefined;
+    const slots = review.slots.filter((slot) => slot.slotId !== id);
+    if (!slots.length) return undefined;
+    return { ...review, status: reviewStatus(slots), summary: "", requestBytes: 0, batches: 0, error: undefined, slots };
+}
+
+function mergeReview(record: EcommerceSetRecord, incoming: EcommerceReview): EcommerceReview {
+    const bySlot = new Map(record.review?.slots.map((slot) => [slot.slotId, slot] as const));
+    incoming.slots.forEach((slot) => bySlot.set(slot.slotId, slot));
+    const slots = record.slots.flatMap((slot) => {
+        if (!isReviewableSlot(slot)) return [];
+        const reviewSlot = bySlot.get(slot.id);
+        return reviewSlot ? [reviewSlot] : [];
+    });
+    return { ...incoming, status: reviewStatus(slots), summary: slots.length === incoming.slots.length ? incoming.summary : "", slots };
+}
+
+function reviewRecordStatus(record: EcommerceSetRecord, review: EcommerceReview) {
+    const enabled = record.slots.filter((slot) => slot.enabled);
+    const generationComplete = enabled.length > 0 && enabled.every((slot) => Boolean(slot.storageKey) && slot.status !== "generation_failed");
+    const complete = generationComplete && enabled.every((slot) => review.slots.some((item) => item.slotId === slot.id));
+    return complete ? ("reviewed" as const) : generationStatus(record.slots);
 }
 
 /** Vision and planning calls use the configured text model, which must accept image input. */
