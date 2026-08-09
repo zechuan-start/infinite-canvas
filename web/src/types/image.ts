@@ -68,6 +68,8 @@ export type EcommerceSetRecord = {
     avoidPrompt: string;
     references: ProductReference[];
     profile?: ProductProfile;
+    /** Product, style, or global inputs changed after the last prompt plan. */
+    planStale?: boolean;
     globalConstraints: string[];
     slots: EcommerceSetSlot[];
     review?: EcommerceReview;

@@ -1,12 +1,12 @@
 import i18n from "@/i18n";
 import { assembleSlotPrompt, buildAnalysisInstruction, buildPlanInstruction, buildReviewInstruction, parseProductProfile, parsePromptPlan, parseReviewSlots } from "@/lib/ecommerce-set/prompt-plan";
-import { referenceRoleLabel, shotRoleLabel } from "@/lib/ecommerce-set/presets";
+import { referenceRoleLabel, slotDescriptor } from "@/lib/ecommerce-set/presets";
 import { isReviewableSlot } from "@/lib/ecommerce-set/review";
 import { compressForVisionReview } from "@/lib/image-compression";
 import { requestEdit, requestImageQuestion, type AiTextMessage } from "@/services/api/image";
 import { blobToDataUrl, getImageBlob, imageToDataUrl, uploadImage } from "@/services/image-storage";
 import type { AiConfig } from "@/stores/use-config-store";
-import type { EcommerceReview, EcommerceReviewSlot, EcommerceSetSlot, EcommerceShotRole, ProductProfile, ProductReference } from "@/types/ecommerce-set";
+import type { EcommerceReview, EcommerceReviewSlot, EcommerceSetSlot, ProductProfile, ProductReference, ShotDescriptor } from "@/types/ecommerce-set";
 
 /** Generated images are compressed only here, and only for the review request. */
 const REVIEW_BATCH_MAX_BYTES = 12 * 1024 * 1024;
@@ -17,13 +17,15 @@ const REVIEW_CONTENT_MAX_BYTES = REVIEW_BATCH_MAX_BYTES - REVIEW_REQUEST_RESERVE
 const setText = (key: string, options?: Record<string, unknown>) => i18n.t(`ecommerceSet.${key}`, options);
 
 type RequestOptions = { signal?: AbortSignal };
+type ReviewContent = Exclude<AiTextMessage["content"], string>;
+type ReviewItem = { shot: ShotDescriptor; dataUrl: string };
 
 type PlanInput = {
     profile: ProductProfile;
     styleText: string;
     globalPrompt: string;
     avoidPrompt: string;
-    slotIds: EcommerceShotRole[];
+    shots: ShotDescriptor[];
 };
 
 export type GeneratedSlotImage = {
@@ -49,10 +51,11 @@ export async function analyzeProduct(config: AiConfig, references: ProductRefere
 
 /** Plan the shot layer, then assemble each slot's full three-layer prompt locally. */
 export async function planSlotPrompts(config: AiConfig, input: PlanInput, options?: RequestOptions) {
-    if (!input.slotIds.length) throw new Error(setText("errors.shotsRequired"));
-    const instruction = buildPlanInstruction(input.profile, input.styleText, input.globalPrompt, input.avoidPrompt, input.slotIds);
+    if (!input.shots.length) throw new Error(setText("errors.shotsRequired"));
+    const instruction = buildPlanInstruction(input.profile, input.styleText, input.globalPrompt, input.avoidPrompt, input.shots);
     const answer = await requestImageQuestion(config, [{ role: "user", content: instruction }], () => {}, options);
-    const plan = parsePromptPlan(answer, input.slotIds);
+    const plan = parsePromptPlan(answer, input.shots);
+    const labels = new Map(input.shots.map((shot) => [shot.id, shot.label] as const));
     const prompts = plan.slots.map((slot) => ({
         id: slot.id,
         prompt: assembleSlotPrompt({
@@ -62,6 +65,7 @@ export async function planSlotPrompts(config: AiConfig, input: PlanInput, option
             avoidPrompt: input.avoidPrompt,
             globalConstraints: plan.globalConstraints,
             slot,
+            label: labels.get(slot.id) || slot.id,
         }),
         requiredElements: slot.requiredElements,
         avoidElements: slot.avoidElements,
@@ -91,8 +95,8 @@ export async function generateSlotImage(config: AiConfig, prompt: string, refere
 }
 
 /**
- * Review the whole set. Product references go up as originals; generated images go up as temporary
- * compressed copies that are never written to `image_files` and are released when this call returns.
+ * Review the whole set. References and generated images use temporary compressed copies that are never
+ * written to `image_files` and are released when this call returns.
  */
 export async function reviewSet(config: AiConfig, input: { references: ProductReference[]; slots: EcommerceSetSlot[]; profile?: ProductProfile }, options?: RequestOptions): Promise<EcommerceReview> {
     const reviewable = input.slots.filter(isReviewableSlot);
@@ -100,32 +104,45 @@ export async function reviewSet(config: AiConfig, input: { references: ProductRe
 
     const referenceUrls: string[] = [];
     for (const reference of input.references) {
-        referenceUrls.push(await originalDataUrl(reference));
+        referenceUrls.push(await compressedReferenceDataUrl(reference));
     }
 
     // Compress every generated image first, so a compression failure blocks the review instead of
     // silently falling back to the uncompressed original.
-    const compressed: Array<{ id: EcommerceShotRole; dataUrl: string; bytes: number }> = [];
+    const compressed: ReviewItem[] = [];
     for (const slot of reviewable) {
+        const shot = slotDescriptor(slot);
         const blob = await getImageBlob(slot.storageKey!);
-        if (!blob) throw new Error(setText("errors.slotImageMissing", { slot: shotRoleLabel(slot.id) }));
+        if (!blob) throw new Error(setText("errors.slotImageMissing", { slot: shot.label }));
         const review = await compressForVisionReview(blob);
-        compressed.push({ id: slot.id, dataUrl: await blobToDataUrl(review.blob), bytes: review.bytes });
+        compressed.push({ shot, dataUrl: await blobToDataUrl(review.blob) });
     }
 
     const batches = splitReviewBatches(compressed, input, referenceUrls);
-    const requestBytes = compressed.reduce((total, item) => total + item.bytes, 0);
     const slots: EcommerceReviewSlot[] = [];
     const summaries: string[] = [];
+    let requestBytes = 0;
+    let batchesAttempted = 0;
+    let failure: string | undefined;
 
     for (const batch of batches) {
-        const slotIds = batch.map((item) => item.id);
+        batchesAttempted += 1;
         const content = buildReviewContent(input, referenceUrls, batch, batches.length > 1);
-
-        const answer = await requestImageQuestion(config, [{ role: "user", content }], () => {}, options);
-        const parsed = parseReviewSlots(answer, slotIds);
-        slots.push(...parsed.slots);
-        if (parsed.summary) summaries.push(parsed.summary);
+        // Every batch re-uploads the references, so count what actually went out rather than the images alone.
+        requestBytes += serializedBytes(content);
+        try {
+            const answer = await requestImageQuestion(config, [{ role: "user", content }], () => {}, options);
+            const parsed = parseReviewSlots(
+                answer,
+                batch.map((item) => item.shot),
+            );
+            slots.push(...parsed.slots);
+            if (parsed.summary) summaries.push(parsed.summary);
+        } catch (error) {
+            if (!slots.length) throw error;
+            failure = error instanceof Error ? error.message : setText("errors.unknown");
+            break;
+        }
     }
 
     // Drop the compressed copies; they must not outlive the review task.
@@ -133,49 +150,92 @@ export async function reviewSet(config: AiConfig, input: { references: ProductRe
 
     return {
         reviewedAt: Date.now(),
-        status: slots.some((slot) => slot.status === "manual_review") ? "manual_review" : "passed",
+        status: failure ? "failed" : slots.some((slot) => slot.status === "manual_review") ? "manual_review" : "passed",
         summary: summaries.join("\n"),
         requestBytes,
-        batches: batches.length,
+        batches: batchesAttempted,
         slots,
+        error: failure,
     };
 }
 
-/** Split by serialized request content size, including repeated original references and base64 data URLs. */
-function splitReviewBatches(items: Array<{ id: EcommerceShotRole; dataUrl: string; bytes: number }>, input: { references: ProductReference[]; profile?: ProductProfile }, referenceUrls: string[]) {
+/**
+ * Split by serialized request content size. Each candidate batch is measured as the request that will
+ * actually be sent, so the repeated compressed references and the per-shot review instruction lines are
+ * both included instead of being estimated from the images alone.
+ */
+function splitReviewBatches(items: ReviewItem[], input: { references: ProductReference[]; profile?: ProductProfile }, referenceUrls: string[]) {
     const batches: Array<typeof items> = [];
+    const emptyInstructionBytes = serializedBytes(buildReviewInstruction(input.profile, input.references.length, [], true));
+    const baseContentBytes = serializedBytes(buildReviewContent(input, referenceUrls, [], true));
     let current: typeof items = [];
+    let appendedContentBytes = 0;
+
+    const batchBytes = (batch: ReviewItem[], appendedBytes: number) => {
+        const instructionBytes = serializedBytes(
+            buildReviewInstruction(
+                input.profile,
+                input.references.length,
+                batch.map((item) => item.shot),
+                true,
+            ),
+        );
+        return baseContentBytes + appendedBytes + instructionBytes - emptyInstructionBytes;
+    };
+
     for (const item of items) {
+        // The base content already has one element, so appending this two-element fragment adds one
+        // delimiter plus the fragment contents. Each multi-megabyte data URL is serialized only once.
+        const fragmentBytes = serializedBytes(buildGeneratedReviewContent(item)) - 1;
         const candidate = [...current, item];
-        if (current.length && reviewContentBytes(input, referenceUrls, candidate) > REVIEW_CONTENT_MAX_BYTES) {
-            batches.push(current);
-            current = [];
+        const candidateContentBytes = appendedContentBytes + fragmentBytes;
+        const candidateBytes = batchBytes(candidate, candidateContentBytes);
+        if (candidateBytes <= REVIEW_CONTENT_MAX_BYTES) {
+            current = candidate;
+            appendedContentBytes = candidateContentBytes;
+            continue;
         }
-        current.push(item);
-        if (reviewContentBytes(input, referenceUrls, current) > REVIEW_CONTENT_MAX_BYTES) {
-            throw new Error(setText("errors.reviewRequestTooLarge"));
-        }
+        if (!current.length) throw new Error(setText("errors.reviewRequestTooLarge"));
+        batches.push(current);
+        current = [item];
+        appendedContentBytes = fragmentBytes;
+        if (batchBytes(current, appendedContentBytes) > REVIEW_CONTENT_MAX_BYTES) throw new Error(setText("errors.reviewRequestTooLarge"));
     }
     if (current.length) batches.push(current);
     return batches;
 }
 
-function buildReviewContent(input: { references: ProductReference[]; profile?: ProductProfile }, referenceUrls: string[], batch: Array<{ id: EcommerceShotRole; dataUrl: string; bytes: number }>, batched: boolean): AiTextMessage["content"] {
-    const slotIds = batch.map((item) => item.id);
-    const content: AiTextMessage["content"] = [{ type: "text", text: buildReviewInstruction(input.profile, input.references.length, slotIds, batched) }];
+function buildReviewContent(input: { references: ProductReference[]; profile?: ProductProfile }, referenceUrls: string[], batch: ReviewItem[], batched: boolean): ReviewContent {
+    const content: AiTextMessage["content"] = [
+        {
+            type: "text",
+            text: buildReviewInstruction(
+                input.profile,
+                input.references.length,
+                batch.map((item) => item.shot),
+                batched,
+            ),
+        },
+    ];
     input.references.forEach((reference, index) => {
         content.push({ type: "text", text: setText("prompts.reviewReferenceLabel", { index: index + 1, role: referenceRoleLabel(reference.role) }) });
         content.push({ type: "image_url", image_url: { url: referenceUrls[index] } });
     });
     batch.forEach((item) => {
-        content.push({ type: "text", text: setText("prompts.reviewGeneratedLabel", { id: item.id, role: shotRoleLabel(item.id) }) });
-        content.push({ type: "image_url", image_url: { url: item.dataUrl } });
+        content.push(...buildGeneratedReviewContent(item));
     });
     return content;
 }
 
-function reviewContentBytes(input: { references: ProductReference[]; profile?: ProductProfile }, referenceUrls: string[], batch: Array<{ id: EcommerceShotRole; dataUrl: string; bytes: number }>) {
-    return new TextEncoder().encode(JSON.stringify(buildReviewContent(input, referenceUrls, batch, true))).byteLength;
+function buildGeneratedReviewContent(item: ReviewItem): ReviewContent {
+    return [
+        { type: "text", text: setText("prompts.reviewGeneratedLabel", { id: item.shot.id, role: item.shot.label }) },
+        { type: "image_url", image_url: { url: item.dataUrl } },
+    ];
+}
+
+function serializedBytes(value: unknown) {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
 /** Original, uncompressed data URL for a product reference. */
@@ -183,4 +243,11 @@ async function originalDataUrl(reference: ProductReference) {
     const url = await imageToDataUrl(reference);
     if (!url) throw new Error(i18n.t("apiErrors.referenceImageReadFailed"));
     return url;
+}
+
+async function compressedReferenceDataUrl(reference: ProductReference) {
+    const stored = reference.storageKey ? await getImageBlob(reference.storageKey) : null;
+    const source = stored || (await (await fetch(await originalDataUrl(reference))).blob());
+    const compressed = await compressForVisionReview(source);
+    return blobToDataUrl(compressed.blob);
 }

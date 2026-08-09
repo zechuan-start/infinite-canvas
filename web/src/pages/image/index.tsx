@@ -18,7 +18,7 @@ import { requestEdit, requestGeneration } from "@/services/api/image";
 import { deleteImageRecords, readImageRecords, saveImageRecord } from "@/services/image-generation-logs";
 import { uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
-import { useEcommerceSetStore } from "@/stores/use-ecommerce-set-store";
+import { shouldPersistSetRecord, useEcommerceSetStore } from "@/stores/use-ecommerce-set-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import type { EcommerceSetRecord, GeneratedImage, GenerationLogConfig, ReferenceImage, SingleGenerationLog } from "@/types/image";
 import i18n from "@/i18n";
@@ -100,6 +100,10 @@ export default function ImagePage() {
     // Mirror the active set task into the history list so progress shows up without a manual refresh.
     useEffect(() => {
         if (!setRecord) return;
+        if (!shouldPersistSetRecord(setRecord)) {
+            setSetRecords((value) => value.filter((item) => item.id !== setRecord.id));
+            return;
+        }
         setSetRecords((value) => {
             const exists = value.some((item) => item.id === setRecord.id);
             return exists ? value.map((item) => (item.id === setRecord.id ? setRecord : item)) : [setRecord, ...value];

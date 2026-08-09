@@ -1,17 +1,19 @@
 import { useRef, useState } from "react";
-import { App, Button, Collapse, Input, Select, Tag, Tooltip } from "antd";
-import { ArrowLeft, ArrowRight, ClipboardPaste, ListChecks, LoaderCircle, ScanSearch, Sparkles, SquareStack, Trash2, Upload, XCircle } from "lucide-react";
+import { App, Button, Collapse, Dropdown, Input, Select, Tag, Tooltip } from "antd";
+import { ArrowLeft, ArrowRight, ClipboardPaste, Copy, ListChecks, LoaderCircle, Plus, ScanSearch, Sparkles, SquareStack, Trash2, Upload, XCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { GenerationSettings } from "@/pages/image/components/generation-settings";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
-import { CUSTOM_STYLE_PRESET_ID, REFERENCE_ROLES, STYLE_PRESETS, referenceRoleLabel, shotRoleLabel } from "@/lib/ecommerce-set/presets";
+import { CUSTOM_STYLE_PRESET_ID, REFERENCE_ROLES, SHOT_ROLES, STYLE_PRESETS, referenceRoleLabel, shotRoleLabel, slotLabel } from "@/lib/ecommerce-set/presets";
 import { imageSizeLabel, imageQualityLabel } from "@/components/image-settings-panel";
 import { modelOptionLabel, useEffectiveConfig } from "@/stores/use-config-store";
 import { useEcommerceSetStore } from "@/stores/use-ecommerce-set-store";
 import type { EcommerceSetRecord } from "@/types/image";
 import type { ProductProfile } from "@/types/ecommerce-set";
 
+/** Past this many references the review batch budget goes mostly to references rather than shots. */
+const REFERENCE_SOFT_LIMIT = 6;
 const PROFILE_TEXT_FIELDS = ["productName", "category", "shape"] as const;
 const PROFILE_LIST_FIELDS = ["materials", "colors", "surfaceDetails", "packagingDetails", "visibleText", "mustKeep", "mustAvoid", "usageNotes"] as const;
 
@@ -31,18 +33,32 @@ export function EcommerceSetPanel({ record }: { record: EcommerceSetRecord }) {
     const analyze = useEcommerceSetStore((state) => state.analyze);
     const plan = useEcommerceSetStore((state) => state.plan);
     const generate = useEcommerceSetStore((state) => state.generate);
+    const addSlot = useEcommerceSetStore((state) => state.addSlot);
     const stop = useEcommerceSetStore((state) => state.stop);
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
+    const visionModel = effectiveConfig.textModel || effectiveConfig.model;
     const enabledSlots = record.slots.filter((slot) => slot.enabled);
     const readySlots = enabledSlots.filter((slot) => slot.prompt.trim());
-    const pendingSlots = readySlots.filter((slot) => !slot.storageKey);
+    const pendingSlots = record.planStale ? [] : readySlots.filter((slot) => !slot.storageKey || slot.stale);
+    /** Explain the disabled generate button; the plan must be refreshed before shots can run again. */
+    const generateBlockedReason = running || pendingSlots.length ? undefined : record.planStale ? t("ecommerceSet.generateBlockedPlanStale") : !readySlots.length ? t("ecommerceSet.generateBlockedNoSlots") : t("ecommerceSet.generateBlockedAllDone");
+
+    /**
+     * References ride along in every review batch, so each extra one shrinks the budget left for
+     * generated shots. Warn past the soft cap instead of blocking a deliberate choice.
+     */
+    const warnOnReferenceCount = (added: number) => {
+        const total = record.references.length + added;
+        if (record.references.length < REFERENCE_SOFT_LIMIT && total > REFERENCE_SOFT_LIMIT) message.warning(t("ecommerceSet.referenceSoftLimit", { count: REFERENCE_SOFT_LIMIT }));
+    };
 
     const addFiles = async (files?: FileList | null) => {
         const images = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
         if (!images.length) return;
         try {
             await addReferences(images.map((file) => ({ blob: file, name: file.name })));
+            warnOnReferenceCount(images.length);
         } catch (error) {
             message.error(error instanceof Error ? error.message : t("ecommerceSet.errors.unknown"));
         }
@@ -63,6 +79,7 @@ export function EcommerceSetPanel({ record }: { record: EcommerceSetRecord }) {
                 return;
             }
             message.success(t("imageWorkbench.clipboardAdded", { count: blobs.length }));
+            warnOnReferenceCount(blobs.length);
         } catch {
             message.error(t("imageWorkbench.clipboardEmpty"));
         }
@@ -188,6 +205,7 @@ export function EcommerceSetPanel({ record }: { record: EcommerceSetRecord }) {
                             {record.profile ? t("ecommerceSet.reanalyze") : t("ecommerceSet.analyze")}
                         </Button>
                     </div>
+                    <p className="mb-2 text-xs text-stone-500 dark:text-stone-400">{t("ecommerceSet.visionModelHint", { model: modelOptionLabel(effectiveConfig, visionModel) })}</p>
                     {record.profile ? (
                         <ProfileEditor profile={record.profile} />
                     ) : (
@@ -200,14 +218,26 @@ export function EcommerceSetPanel({ record }: { record: EcommerceSetRecord }) {
                 <section>
                     <div className="mb-2 flex items-center justify-between gap-3">
                         <span className="text-base font-semibold">{t("ecommerceSet.shotsTitle")}</span>
-                        <Button
-                            size="small"
-                            icon={running && record.status === "planning" ? <LoaderCircle className="size-3.5 animate-spin" /> : <ListChecks className="size-3.5" />}
-                            disabled={running || !record.profile || !enabledSlots.length}
-                            onClick={() => void plan()}
-                        >
-                            {readySlots.length ? t("ecommerceSet.replan") : t("ecommerceSet.planPrompts")}
-                        </Button>
+                        <div className="flex shrink-0 items-center gap-1">
+                            <Dropdown
+                                disabled={running}
+                                menu={{
+                                    items: SHOT_ROLES.map((role) => ({ key: role, label: shotRoleLabel(role), onClick: () => addSlot(role) })),
+                                }}
+                            >
+                                <Button size="small" icon={<Plus className="size-3.5" />}>
+                                    {t("ecommerceSet.addShot")}
+                                </Button>
+                            </Dropdown>
+                            <Button
+                                size="small"
+                                icon={running && record.status === "planning" ? <LoaderCircle className="size-3.5 animate-spin" /> : <ListChecks className="size-3.5" />}
+                                disabled={running || !record.profile || !enabledSlots.length}
+                                onClick={() => void plan()}
+                            >
+                                {readySlots.length ? t("ecommerceSet.replan") : t("ecommerceSet.planPrompts")}
+                            </Button>
+                        </div>
                     </div>
                     <div className="space-y-2">
                         {record.slots.map((slot, index) => (
@@ -244,9 +274,13 @@ export function EcommerceSetPanel({ record }: { record: EcommerceSetRecord }) {
             </div>
 
             <div className="mt-auto flex gap-2 pt-6">
-                <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running && record.status === "generating"} disabled={running || !pendingSlots.length} onClick={() => void generate()}>
-                    {pendingSlots.length && pendingSlots.length !== readySlots.length ? t("ecommerceSet.generateRemaining", { count: pendingSlots.length }) : t("ecommerceSet.generateSet", { count: pendingSlots.length || readySlots.length })}
-                </Button>
+                <Tooltip title={generateBlockedReason}>
+                    <div className="min-w-0 flex-1">
+                        <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running && record.status === "generating"} disabled={running || !pendingSlots.length} onClick={() => void generate()}>
+                            {pendingSlots.length && pendingSlots.length !== readySlots.length ? t("ecommerceSet.generateRemaining", { count: pendingSlots.length }) : t("ecommerceSet.generateSet", { count: pendingSlots.length || readySlots.length })}
+                        </Button>
+                    </div>
+                </Tooltip>
                 {running ? (
                     <Button size="large" danger onClick={stop}>
                         {t("ecommerceSet.stop")}
@@ -308,26 +342,37 @@ function ProfileEditor({ profile }: { profile: ProductProfile }) {
     );
 }
 
-/** One shot: enable/disable, reorder, and edit the full prompt that is actually sent. */
+/** One shot: enable/disable, reorder, duplicate, remove, rename a custom shot, and edit the prompt actually sent. */
 function SlotPromptRow({ slotId, index, total }: { slotId: EcommerceSetRecord["slots"][number]["id"]; index: number; total: number }) {
     const { t } = useTranslation();
     const slot = useEcommerceSetStore((state) => state.record?.slots.find((item) => item.id === slotId));
     const toggleSlot = useEcommerceSetStore((state) => state.toggleSlot);
     const moveSlot = useEcommerceSetStore((state) => state.moveSlot);
     const editSlotPrompt = useEcommerceSetStore((state) => state.editSlotPrompt);
+    const duplicateSlot = useEcommerceSetStore((state) => state.duplicateSlot);
+    const removeSlot = useEcommerceSetStore((state) => state.removeSlot);
+    const editSlotShot = useEcommerceSetStore((state) => state.editSlotShot);
     if (!slot) return null;
 
+    const isCustom = slot.role === "custom";
     return (
         <div className={`rounded-lg border p-2 transition ${slot.enabled ? "border-stone-200 dark:border-stone-800" : "border-dashed border-stone-200 opacity-60 dark:border-stone-800"}`}>
             <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2">
                     <span className="text-xs text-stone-400">{index + 1}</span>
-                    <span className="truncate text-sm font-medium">{shotRoleLabel(slot.id)}</span>
+                    <span className="truncate text-sm font-medium">{slotLabel(slot)}</span>
                     {slot.prompt.trim() ? null : <Tag className="m-0 text-[10px]">{t("ecommerceSet.noPrompt")}</Tag>}
+                    {slot.stale ? <Tag className="m-0 text-[10px]">{t("ecommerceSet.stale")}</Tag> : null}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                     <Button size="small" type="text" icon={<ArrowLeft className="size-3 rotate-90" />} disabled={index <= 0} onClick={() => moveSlot(index, -1)} aria-label={t("ecommerceSet.moveUp")} />
                     <Button size="small" type="text" icon={<ArrowRight className="size-3 rotate-90" />} disabled={index >= total - 1} onClick={() => moveSlot(index, 1)} aria-label={t("ecommerceSet.moveDown")} />
+                    <Tooltip title={t("ecommerceSet.duplicateShot")}>
+                        <Button size="small" type="text" icon={<Copy className="size-3" />} onClick={() => duplicateSlot(slot.id)} aria-label={t("ecommerceSet.duplicateShot")} />
+                    </Tooltip>
+                    <Tooltip title={total <= 1 ? t("ecommerceSet.removeShotBlocked") : t("ecommerceSet.removeShot")}>
+                        <Button size="small" type="text" icon={<Trash2 className="size-3" />} disabled={total <= 1} onClick={() => removeSlot(slot.id)} aria-label={t("ecommerceSet.removeShot")} />
+                    </Tooltip>
                     <Tooltip title={slot.enabled ? t("ecommerceSet.disableShot") : t("ecommerceSet.enableShot")}>
                         <Button size="small" type="text" onClick={() => toggleSlot(slot.id)}>
                             {slot.enabled ? t("ecommerceSet.enabled") : t("ecommerceSet.disabled")}
@@ -335,6 +380,12 @@ function SlotPromptRow({ slotId, index, total }: { slotId: EcommerceSetRecord["s
                     </Tooltip>
                 </div>
             </div>
+            {isCustom ? (
+                <div className="mt-2 space-y-1.5">
+                    <Input size="small" value={slot.label || ""} placeholder={t("ecommerceSet.customShotLabelPlaceholder")} onChange={(event) => editSlotShot(slot.id, { label: event.target.value })} />
+                    <Input.TextArea size="small" value={slot.brief || ""} placeholder={t("ecommerceSet.customShotBriefPlaceholder")} rows={2} onChange={(event) => editSlotShot(slot.id, { brief: event.target.value })} />
+                </div>
+            ) : null}
             {slot.enabled && slot.prompt.trim() ? (
                 <Collapse
                     ghost

@@ -1,7 +1,7 @@
 import type { GenerationLogConfig, ReferenceImage } from "@/types/image";
 
 export type EcommerceReferenceRole = "main" | "packaging" | "detail" | "size" | "other";
-export type EcommerceShotRole = "hero" | "material" | "scene" | "feature" | "packaging" | "closing";
+export type EcommerceShotRole = "hero" | "material" | "scene" | "feature" | "packaging" | "closing" | "custom";
 
 /** Product reference image: a normal reference image plus the role the user assigned to it. */
 export type ProductReference = ReferenceImage & { role: EcommerceReferenceRole };
@@ -22,10 +22,18 @@ export type ProductProfile = {
 
 /** Raw shot layer returned by the planning model, before the product and style layers are prepended. */
 export type PromptPlanSlot = {
-    id: EcommerceShotRole;
+    id: string;
     prompt: string;
     requiredElements: string[];
     avoidElements: string[];
+};
+
+/** What the planning and review models are told about one shot, keyed by the slot's unique id. */
+export type ShotDescriptor = {
+    id: string;
+    role: EcommerceShotRole;
+    label: string;
+    brief: string;
 };
 
 export type PromptPlan = {
@@ -42,14 +50,27 @@ export type EcommerceSlotStatus = "pending" | "generating" | "generated" | "gene
  * so editing it here changes the request. `storageKey` always points at the untouched generated original.
  */
 export type EcommerceSetSlot = {
-    id: EcommerceShotRole;
+    /** Unique within the set. Built-in shots use their role name; duplicated and custom shots get a generated id. */
+    id: string;
+    /** Shot type. Several slots may share a role, e.g. two scene shots. */
+    role: EcommerceShotRole;
+    /** Set only for custom or renamed shots; built-in shots fall back to the role label. */
+    label?: string;
+    /** Set only for custom shots; tells the planning model what this shot must deliver. */
+    brief?: string;
     order: number;
     enabled: boolean;
     prompt: string;
     requiredElements: string[];
     avoidElements: string[];
     status: EcommerceSlotStatus;
+    /** This slot was excluded from the latest plan and must be planned again before generation. */
+    promptStale?: boolean;
+    /** The saved original no longer matches the current prompt or plan, but remains downloadable until regenerated. */
+    stale?: boolean;
     storageKey?: string;
+    /** Fingerprint of the references the saved original was generated from; a mismatch means it is out of date. */
+    referenceKey?: string;
     /** Transient object URL for preview; never persisted. */
     url?: string;
     naturalWidth?: number;
@@ -64,7 +85,7 @@ export type EcommerceSetSlot = {
 };
 
 export type EcommerceReviewSlot = {
-    slotId: EcommerceShotRole;
+    slotId: string;
     status: "passed" | "manual_review";
     confidence?: number;
     checks: {
@@ -80,7 +101,7 @@ export type EcommerceReview = {
     reviewedAt: number;
     status: "passed" | "manual_review" | "failed";
     summary: string;
-    /** Total bytes of the compressed generated images actually uploaded for this review. */
+    /** Serialized bytes of the review requests actually sent, including the references repeated in every batch. */
     requestBytes: number;
     /** Number of review requests used; more than one means the set was reviewed in batches. */
     batches: number;

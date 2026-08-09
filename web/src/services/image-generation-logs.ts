@@ -95,6 +95,7 @@ async function hydrateSetRecord(record: Partial<EcommerceSetRecord>): Promise<Ec
         avoidPrompt: record.avoidPrompt || "",
         references,
         profile: record.profile,
+        planStale: record.planStale,
         globalConstraints: record.globalConstraints || [],
         slots,
         review: record.review,

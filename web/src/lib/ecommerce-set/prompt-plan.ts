@@ -1,8 +1,10 @@
 import i18n from "@/i18n";
-import { referenceRoleLabel, shotBrief, shotRoleLabel } from "@/lib/ecommerce-set/presets";
-import type { EcommerceReviewSlot, EcommerceShotRole, ProductProfile, ProductReference, PromptPlan, PromptPlanSlot } from "@/types/ecommerce-set";
+import { referenceRoleLabel } from "@/lib/ecommerce-set/presets";
+import type { EcommerceReviewSlot, ProductProfile, ProductReference, PromptPlan, PromptPlanSlot, ShotDescriptor } from "@/types/ecommerce-set";
 
 const setText = (key: string, options?: Record<string, unknown>) => i18n.t(`ecommerceSet.${key}`, options);
+const REVIEW_FEEDBACK_START = "<review_feedback>";
+const REVIEW_FEEDBACK_END = "</review_feedback>";
 
 /** Model-facing output language, so generated prompts and summaries follow the UI language. */
 function outputLanguage() {
@@ -58,40 +60,43 @@ export function parseProductProfile(text: string): ProductProfile {
 }
 
 /** Validate the plan against the shots actually requested: same count, unique ids, non-empty prompts. */
-export function parsePromptPlan(text: string, requestedSlotIds: EcommerceShotRole[]): PromptPlan {
+export function parsePromptPlan(text: string, requested: ShotDescriptor[]): PromptPlan {
     const raw = parseJsonObject(text);
     const rawSlots = Array.isArray(raw.slots) ? raw.slots : [];
+    const byId = new Map(requested.map((shot) => [shot.id, shot] as const));
     const seen = new Set<string>();
     const slots: PromptPlanSlot[] = [];
 
     for (const item of rawSlots) {
         if (!item || typeof item !== "object") continue;
         const entry = item as Record<string, unknown>;
-        const id = stringField(entry.id) as EcommerceShotRole;
-        if (!requestedSlotIds.includes(id) || seen.has(id)) continue;
+        const id = stringField(entry.id);
+        const shot = byId.get(id);
+        if (!shot || seen.has(id)) continue;
         const prompt = stringField(entry.prompt);
-        if (!prompt) throw new Error(setText("errors.slotPromptMissing", { slot: shotRoleLabel(id) }));
+        if (!prompt) throw new Error(setText("errors.slotPromptMissing", { slot: shot.label }));
         seen.add(id);
         slots.push({ id, prompt, requiredElements: stringArray(entry.requiredElements), avoidElements: stringArray(entry.avoidElements) });
     }
 
-    const missing = requestedSlotIds.filter((id) => !seen.has(id));
-    if (missing.length) throw new Error(setText("errors.planIncomplete", { shots: missing.map(shotRoleLabel).join(", ") }));
+    const missing = requested.filter((shot) => !seen.has(shot.id));
+    if (missing.length) throw new Error(setText("errors.planIncomplete", { shots: missing.map((shot) => shot.label).join(", ") }));
 
     return {
         globalConstraints: stringArray(raw.globalConstraints),
-        slots: requestedSlotIds.map((id) => slots.find((slot) => slot.id === id)!),
+        slots: requested.map((shot) => slots.find((slot) => slot.id === shot.id)!),
     };
 }
 
-export function parseReviewSlots(text: string, reviewedSlotIds: EcommerceShotRole[]) {
+export function parseReviewSlots(text: string, reviewed: ShotDescriptor[]) {
     const raw = parseJsonObject(text);
     const rawSlots = Array.isArray(raw.slots) ? raw.slots : [];
     const slots: EcommerceReviewSlot[] = [];
 
-    for (const id of reviewedSlotIds) {
+    for (const shot of reviewed) {
+        const id = shot.id;
         const entry = rawSlots.find((item) => item && typeof item === "object" && stringField((item as Record<string, unknown>).slotId) === id) as Record<string, unknown> | undefined;
-        if (!entry) throw new Error(setText("errors.reviewSlotMissing", { slot: shotRoleLabel(id) }));
+        if (!entry) throw new Error(setText("errors.reviewSlotMissing", { slot: shot.label }));
         const checks = (entry.checks && typeof entry.checks === "object" ? entry.checks : {}) as Record<string, unknown>;
         const issues = stringArray(entry.issues);
         const status = stringField(entry.status) === "passed" ? "passed" : "manual_review";
@@ -120,10 +125,10 @@ export function buildAnalysisInstruction(references: ProductReference[]) {
 }
 
 /** Planning instruction: the model only writes the shot layer; product and style layers are added locally. */
-export function buildPlanInstruction(profile: ProductProfile, styleText: string, globalPrompt: string, avoidPrompt: string, slotIds: EcommerceShotRole[]) {
-    const shots = slotIds.map((id, index) => setText("prompts.shotLine", { index: index + 1, id, role: shotRoleLabel(id), brief: shotBrief(id) })).join("\n");
+export function buildPlanInstruction(profile: ProductProfile, styleText: string, globalPrompt: string, avoidPrompt: string, shotList: ShotDescriptor[]) {
+    const shots = shotList.map((shot, index) => setText("prompts.shotLine", { index: index + 1, id: shot.id, role: shot.label, brief: shot.brief })).join("\n");
     return [
-        setText("prompts.planIntro", { count: slotIds.length }),
+        setText("prompts.planIntro", { count: shotList.length }),
         productConstraintText(profile),
         styleText ? setText("prompts.planStyle", { style: styleText }) : "",
         globalPrompt.trim() ? setText("prompts.planGlobal", { text: globalPrompt.trim() }) : "",
@@ -139,10 +144,10 @@ export function buildPlanInstruction(profile: ProductProfile, styleText: string,
 }
 
 /** Fixed review rules; the model may only judge, never trigger a regeneration. */
-export function buildReviewInstruction(profile: ProductProfile | undefined, referenceCount: number, slotIds: EcommerceShotRole[], batched: boolean) {
-    const shots = slotIds.map((id, index) => setText("prompts.reviewShotLine", { index: index + 1, id, role: shotRoleLabel(id) })).join("\n");
+export function buildReviewInstruction(profile: ProductProfile | undefined, referenceCount: number, shotList: ShotDescriptor[], batched: boolean) {
+    const shots = shotList.map((shot, index) => setText("prompts.reviewShotLine", { index: index + 1, id: shot.id, role: shot.label })).join("\n");
     return [
-        setText("prompts.reviewIntro", { references: referenceCount, generated: slotIds.length }),
+        setText("prompts.reviewIntro", { references: referenceCount, generated: shotList.length }),
         batched ? setText("prompts.reviewBatched") : "",
         profile ? productConstraintText(profile) : "",
         setText("prompts.reviewShots"),
@@ -184,13 +189,29 @@ export function productConstraintText(profile: ProductProfile) {
  * Assemble the full three-layer prompt for one shot. The result is stored on the slot and is the only
  * text sent to the image model, so nothing is re-composed at request time.
  */
-export function assembleSlotPrompt({ profile, styleText, globalPrompt, avoidPrompt, globalConstraints, slot }: { profile: ProductProfile; styleText: string; globalPrompt: string; avoidPrompt: string; globalConstraints: string[]; slot: PromptPlanSlot }) {
+export function assembleSlotPrompt({
+    profile,
+    styleText,
+    globalPrompt,
+    avoidPrompt,
+    globalConstraints,
+    slot,
+    label,
+}: {
+    profile: ProductProfile;
+    styleText: string;
+    globalPrompt: string;
+    avoidPrompt: string;
+    globalConstraints: string[];
+    slot: PromptPlanSlot;
+    label: string;
+}) {
     const styleBlock = [styleText.trim(), globalPrompt.trim(), globalConstraints.filter(Boolean).join("\n"), avoidPrompt.trim() ? setText("prompts.avoidLine", { text: avoidPrompt.trim() }) : ""].filter(Boolean).join("\n");
     return [
         productConstraintText(profile),
         styleBlock ? [setText("prompts.styleHeading"), styleBlock].join("\n") : "",
         [
-            setText("prompts.shotHeading", { role: shotRoleLabel(slot.id) }),
+            setText("prompts.shotHeading", { role: label }),
             slot.prompt.trim(),
             slot.requiredElements.length ? setText("prompts.requiredLine", { text: slot.requiredElements.join(", ") }) : "",
             slot.avoidElements.length ? setText("prompts.avoidLine", { text: slot.avoidElements.join(", ") }) : "",
@@ -200,4 +221,22 @@ export function assembleSlotPrompt({ profile, styleText, globalPrompt, avoidProm
     ]
         .filter(Boolean)
         .join("\n\n");
+}
+
+/**
+ * Append the review findings for one shot to its existing prompt, so a regeneration targets exactly what
+ * the review flagged. Appended once per fix round; a later round replaces the previous block.
+ */
+export function applyReviewFeedback(prompt: string, issues: string[]) {
+    const list = issues.map((issue) => issue.trim()).filter(Boolean);
+    if (!list.length) return prompt;
+    const base = stripReviewFeedback(prompt);
+    const feedback = [REVIEW_FEEDBACK_START, setText("prompts.fixHeading"), ...list.map((issue) => setText("prompts.fixLine", { text: issue })), REVIEW_FEEDBACK_END].join("\n");
+    return [base, feedback].filter(Boolean).join("\n\n");
+}
+
+/** Drop a previously appended fix block using a language-independent marker. */
+export function stripReviewFeedback(prompt: string) {
+    const index = prompt.lastIndexOf(REVIEW_FEEDBACK_START);
+    return index < 0 ? prompt.trimEnd() : prompt.slice(0, index).trimEnd();
 }
