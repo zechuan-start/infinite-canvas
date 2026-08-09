@@ -262,21 +262,21 @@ function SlotCard({
                     {slot.attempts > 1 ? <span>{t("ecommerceSet.attempts", { count: slot.attempts })}</span> : null}
                 </div>
                 {reviewSlot ? <SlotChecks reviewSlot={reviewSlot} /> : null}
-                <div className="flex flex-wrap gap-2">
+                <div className="grid grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-2">
                     <Tooltip title={t("ecommerceSet.downloadOriginal")}>
-                        <Button className="min-w-0 flex-1 px-1.5" size="small" icon={<Download className="size-3.5" />} disabled={!slot.storageKey} onClick={onDownload}>
-                            {t("ecommerceSet.downloadOriginal")}
+                        <Button className="!h-auto min-h-8 w-full min-w-0 px-2 py-1" size="small" icon={<Download className="size-3.5" />} disabled={!slot.storageKey} onClick={onDownload}>
+                            <span className="min-w-0 whitespace-normal text-center leading-4">{t("ecommerceSet.downloadOriginal")}</span>
                         </Button>
                     </Tooltip>
                     <Tooltip title={reviewSlot ? t("ecommerceSet.reviewAgain") : t("ecommerceSet.reviewOne")}>
-                        <Button className="min-w-0 flex-1 px-1.5" size="small" icon={<Check className="size-3.5" />} loading={slot.status === "review_pending"} disabled={running || !isReviewableSlot(slot)} onClick={onReview}>
-                            {reviewSlot ? t("ecommerceSet.reviewAgain") : t("ecommerceSet.reviewOne")}
+                        <Button className="!h-auto min-h-8 w-full min-w-0 px-2 py-1" size="small" icon={<Check className="size-3.5" />} loading={slot.status === "review_pending"} disabled={running || !isReviewableSlot(slot)} onClick={onReview}>
+                            <span className="min-w-0 whitespace-normal text-center leading-4">{reviewSlot ? t("ecommerceSet.reviewAgain") : t("ecommerceSet.reviewOne")}</span>
                         </Button>
                     </Tooltip>
                     {canRetry ? (
                         <Tooltip title={retryBlocked || retryLabel}>
                             <Button
-                                className="min-w-0 flex-1 px-1.5"
+                                className="!h-auto min-h-8 w-full min-w-0 px-2 py-1"
                                 size="small"
                                 danger={failed}
                                 icon={<RefreshCw className="size-3.5" />}
@@ -284,14 +284,14 @@ function SlotCard({
                                 disabled={running || planStale || !slot.enabled || !slot.prompt.trim()}
                                 onClick={onRetry}
                             >
-                                {retryLabel}
+                                <span className="min-w-0 whitespace-normal text-center leading-4">{retryLabel}</span>
                             </Button>
                         </Tooltip>
                     ) : null}
                     {fixable ? (
                         <Tooltip title={retryBlocked || t("ecommerceSet.applyReviewFixHint")}>
-                            <Button className="min-w-0 flex-1 px-1.5" size="small" icon={<Wand2 className="size-3.5" />} loading={slot.status === "generating"} disabled={running || planStale} onClick={onApplyFix}>
-                                {t("ecommerceSet.applyReviewFix")}
+                            <Button className="!h-auto min-h-8 w-full min-w-0 px-2 py-1" size="small" icon={<Wand2 className="size-3.5" />} loading={slot.status === "generating"} disabled={running || planStale} onClick={onApplyFix}>
+                                <span className="min-w-0 whitespace-normal text-center leading-4">{t("ecommerceSet.applyReviewFix")}</span>
                             </Button>
                         </Tooltip>
                     ) : null}
